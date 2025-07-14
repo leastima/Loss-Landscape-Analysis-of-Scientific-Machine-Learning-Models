@@ -30,8 +30,6 @@ def main():
                         help='number of temporal sample points')
     parser.add_argument('--num_res', type=int, default=10000,
                         help='number of sampled residual points')
-    parser.add_argument('--epochs', type=int, default=1000,
-                        help='number of epochs to run')
     parser.add_argument('--wandb_project', type=str,
                         default='pinns', help='W&B project name')
     parser.add_argument('--device', type=str, default=0, help='GPU to use')
@@ -47,6 +45,10 @@ def main():
         model_folder = os.path.join("saved_models", "system_convection", f"N_f_{args.num_res}", f"beta_{args.pde_params[1]}")
         dataset_path = os.path.join("./dataset", f'system_{experiment_args["pde"]}', 
                           f'N_f_{experiment_args["num_res"]}',f'beta_{float(experiment_args["pde_params"][-1])}', 'train.pt') 
+    elif args.pde == "reaction":
+        model_folder = os.path.join("saved_models", "system_reaction", f"N_f_{args.num_res}", f"rho_{args.pde_params[1]}")
+        dataset_path = os.path.join("./dataset", f'system_{experiment_args["pde"]}', 
+                          f'N_f_{experiment_args["num_res"]}',f'rho_{float(experiment_args["pde_params"][-1])}', 'train.pt')
 
     for filename in os.listdir(model_folder):
         if filename.endswith(".pt"):
