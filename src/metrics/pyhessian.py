@@ -62,7 +62,7 @@ class hessian():
   - loss_comp: string indicating which component of the loss to use (will use total loss for any value other than "res", "bc", or "ic")
   - device: string indicating which CUDA device to use (where both model and data reside)
   """
-  def __init__(self, model, pred_func, loss_func, data, loss_comp=None, device='cuda'):
+  def __init__(self, model, pred_func, loss_func, data, loss_comp=None, device='cpu'):
     self.model = model.eval()
     self.pred_func = pred_func
     self.loss_func = loss_func

@@ -5,19 +5,21 @@ import sys
 import traceback
 import torch
 import os
+import json
 import numpy as np
 
-from src.train_utils import set_random_seed, train
-from src.models import PINN
+from src.models.train_utils import set_random_seed, train
+from src.models.models import PINN
 
 def main():
     # Parse arguments
     parser = argparse.ArgumentParser()
-    parser.add_argument('--seed', type=int, default=1234, help='initial seed')
+    parser.add_argument('--seed_sample', type=int, default=1234, help='sample seed')
+    parser.add_argument('--seed_init', type=int, default=1234, help='initial seed')
     parser.add_argument('--pde', type=str,
                         default='convection', help='PDE type')
     parser.add_argument('--pde_params', nargs='+', type=str,
-                        default=None, help='PDE coefficients')
+                        default='{"beta":30}', help='PDE coefficients')
     parser.add_argument('--opt', type=str, default='lbfgs',
                         help='optimizer to use')
     parser.add_argument('--opt_params', nargs='+', type=str,
@@ -38,20 +40,20 @@ def main():
                         help='number of epochs to run')
     parser.add_argument('--wandb_project', type=str,
                         default='pinns', help='W&B project name')
-    parser.add_argument('--new_data', default=False, help='whether to create a new training set')
+    parser.add_argument('--new_data', default=True, help='whether to create a new training set')
     parser.add_argument('--device', type=str, default=0, help='GPU to use')
-    parser.add_argument('--save_path', type=str, help='path to save the results of experiments')
-    parser.add_argument('--save_model', default=False, help='Save the model for analysis later.')
+    parser.add_argument('--save_path', type=str, default='../../output/', help='path to save the results of experiments')
+    parser.add_argument('--save_model', default=True, help='Save the model for analysis later.')
 
     # Extract arguments from parser
     args = parser.parse_args()
     # set initial seed
-    initial_seed = args.seed
-    set_random_seed(initial_seed)
+    initial_seed = args.seed_init
+    sample_seed = args.seed_sample
 
     # organize arguments for the experiment into a dictionary for logging purpose
     experiment_args = {
-        "initial_seed": args.seed,
+        "initial_seed": initial_seed,
         "pde": args.pde,
         "pde_params": args.pde_params,
         "opt": args.opt,
@@ -87,20 +89,22 @@ def main():
     print("Weights and Biases project: {}".format(
         experiment_args["wandb_project"]))
     print("GPU to use: {}".format(experiment_args["device"]))
-    
+
+    pde_param = json.loads(experiment_args["pde_params"])
     if experiment_args["pde"] == 'convection':
         folder = os.path.join(experiment_args["save_path"], f'system_{experiment_args["pde"]}', 
-                          f'N_f_{experiment_args["num_res"]}',f'beta_{float(experiment_args["pde_params"][-1])}')
-        dataset_path = os.path.join("./dataset", f'system_{experiment_args["pde"]}', 
-                          f'N_f_{experiment_args["num_res"]}',f'beta_{float(experiment_args["pde_params"][-1])}')
+                          f'N_f_{experiment_args["num_res"]}',f'beta_{float(pde_param["beta"])}')
+        dataset_path = os.path.join("../../dataset", f'system_{experiment_args["pde"]}',
+                          f'N_f_{experiment_args["num_res"]}',f'beta_{float(pde_param["beta"])}')
     elif experiment_args["pde"] == 'reaction':
         folder = os.path.join(experiment_args["save_path"], f'system_{experiment_args["pde"]}', 
-                          f'N_f_{experiment_args["num_res"]}',f'rho_{float(experiment_args["pde_params"][-1])}')
-        dataset_path = os.path.join("./dataset", f'system_{experiment_args["pde"]}', 
-                          f'N_f_{experiment_args["num_res"]}',f'rho_{float(experiment_args["pde_params"][-1])}')
+                          f'N_f_{experiment_args["num_res"]}',f'rho_{float(pde_param["rho"])}')
+        dataset_path = os.path.join("../../dataset", f'system_{experiment_args["pde"]}',
+                          f'N_f_{experiment_args["num_res"]}',f'rho_{float(pde_param["rho"])}')
 
     with wandb.init(project=experiment_args["wandb_project"], config=experiment_args):
         # initialize model
+        set_random_seed(initial_seed)
         model = PINN(in_dim=2, hidden_dim=experiment_args["num_neurons"], out_dim=1,
                      num_layer=experiment_args["num_layers"]).to(experiment_args["device"])
         # train the model
@@ -119,7 +123,8 @@ def main():
                   device=experiment_args["device"],
                   folder=folder,
                   dataset_path=dataset_path,
-                  new_data=experiment_args["new_data"]
+                  new_data=experiment_args["new_data"],
+                  sample_seed=sample_seed
                   )
         # log error and traceback info to W&B, and exit gracefully
         except Exception as e:
@@ -135,7 +140,7 @@ def main():
                 f"rho_{experiment_args['pde_params'][1]}")
             if not os.path.exists(path):
                 os.makedirs(path)
-            save_path = os.path.join(path, f"seed_{initial_seed}.pt")
+            save_path = os.path.join(path, f"sample_{sample_seed}_init_{initial_seed}.pt")
             torch.save(model.state_dict(), save_path)
 
 if __name__ == "__main__":

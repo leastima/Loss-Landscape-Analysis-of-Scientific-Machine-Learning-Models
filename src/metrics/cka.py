@@ -7,8 +7,8 @@ import os
 import numpy as np
 import math
 
-from src.train_utils import *
-from src.models import PINN
+from src.models.train_utils import *
+from src.models.models import PINN
 
 class CKA(object):
     def __init__(self):

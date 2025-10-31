@@ -8,8 +8,8 @@ import numpy as np
 import math
 import copy
 
-from src.train_utils import *
-from src.models import PINN
+from src.models.train_utils import *
+from src.models.models import PINN
 from collections import OrderedDict
 
 def main():

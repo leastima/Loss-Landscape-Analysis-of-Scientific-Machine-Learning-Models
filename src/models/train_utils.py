@@ -2,14 +2,15 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.optim import Adam, LBFGS
-from .opts.adam_lbfgs import Adam_LBFGS
-from .opts.adam_lbfgs_nncg import Adam_LBFGS_NNCG
-from .opts.adam_lbfgs_gd import Adam_LBFGS_GD
+from src.opts.adam_lbfgs import Adam_LBFGS
+from src.opts.adam_lbfgs_nncg import Adam_LBFGS_NNCG
+from src.opts.adam_lbfgs_gd import Adam_LBFGS_GD
 import random
 import re
 import wandb
 import os
-from src.pyhessian import *
+import json
+from src.metrics.pyhessian import *
 
 LOG_FREQ = 20 # Hard-coded for now -- this is done to match the max_iter of the LBFGS optimizer + save time
 
@@ -260,7 +261,7 @@ where:
 > b_lower: numpy array / tensor of size (t_num) * 2; lower boundary points
 > res_idx: numpy array of length (x_num-2)(t_num-1) or num_res_samples; corresponding indices of the sampled residual points from the interior grid
 """
-def get_data(x_range, t_range, x_num, t_num, random=False, num_res_samples=1e4, device='cpu'):
+def get_data(x_range, t_range, x_num, t_num, random=False, num_res_samples=1e4, device='cpu', sample_seed=1234):
     # generate initial and boundary points
     x = np.linspace(x_range[0], x_range[1], x_num).reshape(-1, 1)
     t = np.linspace(t_range[0], t_range[1], t_num).reshape(-1, 1)
@@ -281,7 +282,8 @@ def get_data(x_range, t_range, x_num, t_num, random=False, num_res_samples=1e4, 
         "x_num": x_num, 
         "t_num": t_num
     }
-    if random: 
+    if random:
+        set_random_seed(sample_seed)
         mesh = np.hstack((x_mesh.flatten()[:, None], t_mesh.flatten()[:, None]))
         idx = np.random.choice(mesh.shape[0], num_res_samples, replace=False)
         x_res = mesh[idx, 0:1]
@@ -293,15 +295,14 @@ def get_data(x_range, t_range, x_num, t_num, random=False, num_res_samples=1e4, 
         data_params["res_idx"] = np.arange((x_num - 2) * (t_num - 1))
 
     # move data to target device
-    if device != 'cpu': 
-        x_left = torch.tensor(x_left, dtype=torch.float32, requires_grad=True).to(device)
-        t_left = torch.tensor(t_left, dtype=torch.float32, requires_grad=True).to(device)
-        x_upper = torch.tensor(x_upper, dtype=torch.float32, requires_grad=True).to(device)
-        t_upper = torch.tensor(t_upper, dtype=torch.float32, requires_grad=True).to(device)
-        x_lower = torch.tensor(x_lower, dtype=torch.float32, requires_grad=True).to(device)
-        t_lower = torch.tensor(t_lower, dtype=torch.float32, requires_grad=True).to(device)
-        x_res = torch.tensor(x_res, dtype=torch.float32, requires_grad=True).to(device)
-        t_res = torch.tensor(t_res, dtype=torch.float32, requires_grad=True).to(device)
+    x_left = torch.tensor(x_left, dtype=torch.float32, requires_grad=True).to(device)
+    t_left = torch.tensor(t_left, dtype=torch.float32, requires_grad=True).to(device)
+    x_upper = torch.tensor(x_upper, dtype=torch.float32, requires_grad=True).to(device)
+    t_upper = torch.tensor(t_upper, dtype=torch.float32, requires_grad=True).to(device)
+    x_lower = torch.tensor(x_lower, dtype=torch.float32, requires_grad=True).to(device)
+    t_lower = torch.tensor(t_lower, dtype=torch.float32, requires_grad=True).to(device)
+    x_res = torch.tensor(x_res, dtype=torch.float32, requires_grad=True).to(device)
+    t_res = torch.tensor(t_res, dtype=torch.float32, requires_grad=True).to(device)
 
     # form tuples
     x = (x_res, x_left, x_upper, x_lower)
@@ -498,33 +499,11 @@ INPUT:
 OUTPUT: 
 - params_dict: dictionary
 """
-def parse_params_list(params_list): 
+def parse_params_list(params_list):
     # return an empty dictionary if there is no parameters specified
-    if params_list is None: 
+    if params_list is None:
         return {}
-
-    # parse parameter names and specified (if any) values
-    params_dict = {}
-    current_parameter = None
-    match_number = re.compile('-?\ *[0-9]+\.?[0-9]*(?:[Ee]\ *-?\ *[0-9]+)?')
-    for token in params_list: 
-        # attempt to extract a number from the token
-        parsed_number = re.search(match_number, token)
-        # if no match is found, then the token is a parameter name
-        if parsed_number is None:
-            params_dict[token] = None
-            current_parameter = token
-        # if the token indeed is a number (integer, decimal, or in scientific notation)
-        else: 
-            # if the current parameter is not specified yet, then the number is the value of the current parameter
-            # otherwise, the number is appended to the list of values associated with current parameter
-            if params_dict[current_parameter] is not None:
-                if not isinstance(params_dict[current_parameter], list):
-                    params_dict[current_parameter] = [params_dict[current_parameter]]
-                params_dict[current_parameter].append(float(parsed_number.group()))
-            else:
-                params_dict[current_parameter] = float(parsed_number.group())
-    
+    params_dict = json.loads(params_list)
     return params_dict
 
 """
@@ -585,11 +564,13 @@ def train(model,
           device,
           folder,
           dataset_path,
-          new_data):
+          new_data,
+          sample_seed):
     
     metric_file = os.path.join(folder, "base_metrics.npy")
     if not os.path.exists(metric_file):
-        os.makedirs(folder)
+        if not os.path.exists(folder):
+            os.makedirs(folder)
         metrics = {
             'loss': [],
             'loss_res': [],
@@ -616,7 +597,7 @@ def train(model,
     if new_data:
         if not os.path.exists(dataset_path):
             os.makedirs(dataset_path)
-        training_set = os.path.join(dataset_path, 'train.pt')
+        training_set = os.path.join(dataset_path, 'train_'+str(sample_seed)+'.pt')
         x, t, data_params = get_data(x_range, t_range, n_x, n_t, random=True, num_res_samples=n_res, device=device)
         wandb.log({'x': x, 't': t}) # Log training set
         torch.save({
@@ -734,9 +715,9 @@ def train(model,
     test_l1re = l1_relative_error(predictions, targets)
     test_l2re = l2_relative_error(predictions, targets)
 
-    wandb.log({'train/l1re': train_l1re, 
-                'train/l2re': train_l2re, 
-                'test/l1re': test_l1re, 
+    wandb.log({'train/l1re': train_l1re,
+                'train/l2re': train_l2re,
+                'test/l1re': test_l1re,
                 'test/l2re': test_l2re})
     
     metrics['train/l1re'].append(train_l1re)
