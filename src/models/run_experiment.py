@@ -17,9 +17,9 @@ def main():
     parser.add_argument('--seed_sample', type=int, default=1234, help='sample seed')
     parser.add_argument('--seed_init', type=int, default=1234, help='initial seed')
     parser.add_argument('--pde', type=str,
-                        default='convection', help='PDE type')
+                        default='wave', help='PDE type')
     parser.add_argument('--pde_params', nargs='+', type=str,
-                        default='{"beta":30}', help='PDE coefficients')
+                        default='{"beta":2, "c":2}', help='PDE coefficients')
     parser.add_argument('--opt', type=str, default='lbfgs',
                         help='optimizer to use')
     parser.add_argument('--opt_params', nargs='+', type=str,
@@ -34,7 +34,7 @@ def main():
                         help='number of spatial sample points (power of 2 + 1)')
     parser.add_argument('--num_t', type=int, default=101,
                         help='number of temporal sample points')
-    parser.add_argument('--num_res', type=int, default=10000,
+    parser.add_argument('--num_res', type=int, default=1000,
                         help='number of sampled residual points')
     parser.add_argument('--epochs', type=int, default=1000,
                         help='number of epochs to run')
@@ -44,6 +44,8 @@ def main():
     parser.add_argument('--device', type=str, default=0, help='GPU to use')
     parser.add_argument('--save_path', type=str, default='../../output/', help='path to save the results of experiments')
     parser.add_argument('--save_model', default=True, help='Save the model for analysis later.')
+
+    parser.add_argument('--hc', type=str, default='alm', help='hc method')
 
     # Extract arguments from parser
     args = parser.parse_args()
@@ -93,14 +95,28 @@ def main():
     pde_param = json.loads(experiment_args["pde_params"])
     if experiment_args["pde"] == 'convection':
         folder = os.path.join(experiment_args["save_path"], f'system_{experiment_args["pde"]}', 
-                          f'N_f_{experiment_args["num_res"]}',f'beta_{float(pde_param["beta"])}')
+                          f'N_f_{experiment_args["num_res"]}',f'beta_{float(pde_param["beta"])}', args.hc)
         dataset_path = os.path.join("../../dataset", f'system_{experiment_args["pde"]}',
-                          f'N_f_{experiment_args["num_res"]}',f'beta_{float(pde_param["beta"])}')
+                          f'N_f_{experiment_args["num_res"]}',f'beta_{float(pde_param["beta"])}', args.hc)
     elif experiment_args["pde"] == 'reaction':
         folder = os.path.join(experiment_args["save_path"], f'system_{experiment_args["pde"]}', 
-                          f'N_f_{experiment_args["num_res"]}',f'rho_{float(pde_param["rho"])}')
+                          f'N_f_{experiment_args["num_res"]}',f'rho_{float(pde_param["rho"])}', args.hc)
         dataset_path = os.path.join("../../dataset", f'system_{experiment_args["pde"]}',
-                          f'N_f_{experiment_args["num_res"]}',f'rho_{float(pde_param["rho"])}')
+                          f'N_f_{experiment_args["num_res"]}',f'rho_{float(pde_param["rho"])}', args.hc)
+    elif experiment_args["pde"] == 'reaction_diffusion':
+        folder = os.path.join(experiment_args["save_path"], f'system_{experiment_args["pde"]}',
+                              f'N_f_{experiment_args["num_res"]}',
+                              f'nu_{float(pde_param["nu"])}_rho_{float(pde_param["rho"])}', args.hc)
+        dataset_path = os.path.join("../../dataset", f'system_{experiment_args["pde"]}',
+                                    f'N_f_{experiment_args["num_res"]}',
+                                    f'nu_{float(pde_param["nu"])}_rho_{float(pde_param["rho"])}', args.hc)
+    elif experiment_args["pde"] == 'wave':
+        folder = os.path.join(experiment_args["save_path"], f'system_{experiment_args["pde"]}',
+                              f'N_f_{experiment_args["num_res"]}',
+                              f'beta_{float(pde_param["beta"])}_c_{float(pde_param["c"])}', args.hc)
+        dataset_path = os.path.join("../../dataset", f'system_{experiment_args["pde"]}',
+                                    f'N_f_{experiment_args["num_res"]}',
+                                    f'beta_{float(pde_param["beta"])}_c_{float(pde_param["c"])}', args.hc)
 
     with wandb.init(project=experiment_args["wandb_project"], config=experiment_args):
         # initialize model
@@ -124,7 +140,9 @@ def main():
                   folder=folder,
                   dataset_path=dataset_path,
                   new_data=experiment_args["new_data"],
-                  sample_seed=sample_seed
+                  sample_seed=sample_seed,
+                  hc=args.hc,
+                  L=1
                   )
         # log error and traceback info to W&B, and exit gracefully
         except Exception as e:
@@ -132,15 +150,7 @@ def main():
             raise e
         
         if experiment_args["save_model"]:
-            if experiment_args["pde"] == "convection":
-                path = os.path.join("saved_models", f"system_{experiment_args['pde']}", f"N_f_{experiment_args['num_res']}",
-                f"beta_{experiment_args['pde_params'][1]}")
-            elif experiment_args["pde"] == "reaction":
-                path = os.path.join("saved_models", f"system_{experiment_args['pde']}", f"N_f_{experiment_args['num_res']}",
-                f"rho_{experiment_args['pde_params'][1]}")
-            if not os.path.exists(path):
-                os.makedirs(path)
-            save_path = os.path.join(path, f"sample_{sample_seed}_init_{initial_seed}.pt")
+            save_path = os.path.join(folder, f"sample_{sample_seed}_initial_{initial_seed}.pt")
             torch.save(model.state_dict(), save_path)
 
 if __name__ == "__main__":

@@ -1,3 +1,5 @@
+import json
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -9,7 +11,7 @@ import random
 import re
 import wandb
 import os
-import json
+import sys
 from src.metrics.pyhessian import *
 
 LOG_FREQ = 20 # Hard-coded for now -- this is done to match the max_iter of the LBFGS optimizer + save time
@@ -27,7 +29,9 @@ OUTPUT:
 - loss_func: loss function that takes (x,t,pred) and computes the total loss
 - pde_coefs: dictionary containing coefficients of the PDE
 """
-def get_pde(pde_name, pde_params_list, loss_name): 
+
+
+def get_pde(pde_name, pde_params_list, loss_name):
     # determine loss type
     loss_options = {
         "l1": {"res": nn.L1Loss(), "bc": nn.L1Loss(), "ic": nn.L1Loss()},
@@ -35,83 +39,138 @@ def get_pde(pde_name, pde_params_list, loss_name):
         "huber": {"res": nn.HuberLoss(), "bc": nn.HuberLoss(), "ic": nn.HuberLoss()},
         "hybrid": {"res": nn.HuberLoss(), "bc": nn.MSELoss(), "ic": nn.MSELoss()}
     }
-    try: 
+    try:
         loss_type = loss_options[loss_name]
     except KeyError as ke:
         raise RuntimeError("{} is not a valid loss type.".format(ke))
 
     # parse PDE parameters
     pde_coefs = parse_params_list(pde_params_list)
-    
+
     # determine pde type
-    if pde_name == "convection": 
-        if "beta" not in pde_coefs.keys(): 
+    if pde_name == "convection":
+        if "beta" not in pde_coefs.keys():
             raise KeyError("beta is not specified for convection PDE.")
 
         x_range = [0, 2 * np.pi]
         t_range = [0, 1]
 
-        def loss_func(x, t, pred): 
+        def loss_func(x, t, pred):
             x_res, x_left, x_upper, x_lower = x
             t_res, t_left, t_upper, t_lower = t
             outputs_res, outputs_left, outputs_upper, outputs_lower = pred
 
-            u_x = torch.autograd.grad(outputs_res, x_res, grad_outputs=torch.ones_like(outputs_res), retain_graph=True, create_graph=True)[0]
-            u_t = torch.autograd.grad(outputs_res, t_res, grad_outputs=torch.ones_like(outputs_res), retain_graph=True, create_graph=True)[0]
+            u_x = torch.autograd.grad(outputs_res, x_res, grad_outputs=torch.ones_like(outputs_res), retain_graph=True,
+                                      create_graph=True)[0]
+            u_t = torch.autograd.grad(outputs_res, t_res, grad_outputs=torch.ones_like(outputs_res), retain_graph=True,
+                                      create_graph=True)[0]
 
             loss_res = loss_type["res"](u_t + pde_coefs["beta"] * u_x, torch.zeros_like(u_t))
             loss_bc = loss_type["bc"](outputs_upper - outputs_lower, torch.zeros_like(outputs_upper))
-            loss_ic = loss_type["ic"](outputs_left[:,0], torch.sin(x_left[:,0]))
+            loss_ic = loss_type["ic"](outputs_left[:, 0], torch.sin(x_left[:, 0]))
 
             # loss = loss_res + loss_bc + loss_ic
 
             return loss_res, loss_bc, loss_ic
 
-    elif pde_name == "reaction_diffusion": 
-        if not {"nu", "rho"} <= pde_coefs.keys(): 
+        def loss_func_list(x, t, pred):
+            x_res, x_left, x_upper, x_lower = x
+            t_res, t_left, t_upper, t_lower = t
+            outputs_res, outputs_left, outputs_upper, outputs_lower = pred
+
+            u_x = torch.autograd.grad(outputs_res, x_res, grad_outputs=torch.ones_like(outputs_res), retain_graph=True,
+                                      create_graph=True)[0]
+            u_t = torch.autograd.grad(outputs_res, t_res, grad_outputs=torch.ones_like(outputs_res), retain_graph=True,
+                                      create_graph=True)[0]
+
+            return u_t + pde_coefs["beta"] * u_x, outputs_upper - outputs_lower, outputs_left[:, 0] - torch.sin(
+                x_left[:, 0])
+
+    elif pde_name == "reaction_diffusion":
+        if not {"nu", "rho"} <= pde_coefs.keys():
             raise KeyError("nu or rho is not specified for reaction diffusion PDE.")
 
         x_range = [0, 2 * np.pi]
         t_range = [0, 1]
 
-        def loss_func(x, t, pred): 
+        def loss_func(x, t, pred):
             x_res, x_left, x_upper, x_lower = x
             t_res, t_left, t_upper, t_lower = t
             outputs_res, outputs_left, outputs_upper, outputs_lower = pred
 
-            u_x = torch.autograd.grad(outputs_res, x_res, grad_outputs=torch.ones_like(outputs_res), retain_graph=True, create_graph=True)[0]
-            u_xx = torch.autograd.grad(u_x, x_res, grad_outputs=torch.ones_like(outputs_res), retain_graph=True, create_graph=True)[0]
-            u_t = torch.autograd.grad(outputs_res, t_res, grad_outputs=torch.ones_like(outputs_res), retain_graph=True, create_graph=True)[0]
+            u_x = torch.autograd.grad(outputs_res, x_res, grad_outputs=torch.ones_like(outputs_res), retain_graph=True,
+                                      create_graph=True)[0]
+            u_xx = torch.autograd.grad(u_x, x_res, grad_outputs=torch.ones_like(outputs_res), retain_graph=True,
+                                       create_graph=True)[0]
+            u_t = torch.autograd.grad(outputs_res, t_res, grad_outputs=torch.ones_like(outputs_res), retain_graph=True,
+                                      create_graph=True)[0]
 
-            loss_res = loss_type["res"](u_t - pde_coefs["nu"] * u_xx - pde_coefs["rho"] * outputs_res * (1 - outputs_res), torch.zeros_like(u_t))
+            loss_res = loss_type["res"](
+                u_t - pde_coefs["nu"] * u_xx - pde_coefs["rho"] * outputs_res * (1 - outputs_res),
+                torch.zeros_like(u_t))
             loss_bc = loss_type["bc"](outputs_upper - outputs_lower, torch.zeros_like(outputs_upper))
-            loss_ic = loss_type["ic"](outputs_left[:,0], torch.exp(-(1/2) * torch.square((x_left[:,0] - np.pi) / (np.pi / 4))))
+            # loss_ic = loss_type["ic"](outputs_left[:,0], torch.exp(-(1/2) * torch.square((x_left[:,0] - np.pi) / (np.pi / 4))))
+            loss_ic = loss_type["ic"](outputs_left[:, 0], torch.exp(-2 * torch.square(x_left[:, 0] - np.pi)))
 
             # loss = loss_res + loss_bc + loss_ic
 
             return loss_res, loss_bc, loss_ic
 
-    elif pde_name == "reaction": 
-        if "rho" not in pde_coefs.keys(): 
+        def loss_func_list(x, t, pred):
+            x_res, x_left, x_upper, x_lower = x
+            t_res, t_left, t_upper, t_lower = t
+            outputs_res, outputs_left, outputs_upper, outputs_lower = pred
+
+            u_x = torch.autograd.grad(outputs_res, x_res, grad_outputs=torch.ones_like(outputs_res), retain_graph=True,
+                                      create_graph=True)[0]
+            u_xx = torch.autograd.grad(u_x, x_res, grad_outputs=torch.ones_like(outputs_res), retain_graph=True,
+                                       create_graph=True)[0]
+            u_t = torch.autograd.grad(outputs_res, t_res, grad_outputs=torch.ones_like(outputs_res), retain_graph=True,
+                                      create_graph=True)[0]
+
+            # loss = loss_res + loss_bc + loss_ic
+
+            return u_t - pde_coefs["nu"] * u_xx - pde_coefs["rho"] * outputs_res * (
+                        1 - outputs_res), outputs_upper - outputs_lower, outputs_left[:, 0] - torch.exp(
+                -2 * torch.square(x_left[:, 0] - np.pi))
+            # return u_t - pde_coefs["nu"] * u_xx - pde_coefs["rho"] * outputs_res * (1 - outputs_res), outputs_upper - outputs_lower, outputs_left[:,0] - torch.exp(-(1/2) * torch.square((x_left[:,0] - np.pi) / (np.pi / 4)))
+
+
+    elif pde_name == "reaction":
+        if "rho" not in pde_coefs.keys():
             raise KeyError("rho is not specified for reaction PDE.")
 
         x_range = [0, 2 * np.pi]
         t_range = [0, 1]
 
-        def loss_func(x, t, pred): 
+        def loss_func(x, t, pred):
             x_res, x_left, x_upper, x_lower = x
             t_res, t_left, t_upper, t_lower = t
             outputs_res, outputs_left, outputs_upper, outputs_lower = pred
 
-            u_t = torch.autograd.grad(outputs_res, t_res, grad_outputs=torch.ones_like(outputs_res), retain_graph=True, create_graph=True)[0]
+            u_t = torch.autograd.grad(outputs_res, t_res, grad_outputs=torch.ones_like(outputs_res), retain_graph=True,
+                                      create_graph=True)[0]
 
             loss_res = loss_type["res"](u_t - pde_coefs["rho"] * outputs_res * (1 - outputs_res), torch.zeros_like(u_t))
             loss_bc = loss_type["bc"](outputs_upper - outputs_lower, torch.zeros_like(outputs_upper))
-            loss_ic = loss_type["ic"](outputs_left[:,0], torch.exp(-(1/2) * torch.square((x_left[:,0] - np.pi) / (np.pi / 4))))
+            loss_ic = loss_type["ic"](outputs_left[:, 0],
+                                      torch.exp(-(1 / 2) * torch.square((x_left[:, 0] - np.pi) / (np.pi / 4))))
 
             # loss = loss_res + loss_bc + loss_ic
 
             return loss_res, loss_bc, loss_ic
+
+        def loss_func_list(x, t, pred):
+            x_res, x_left, x_upper, x_lower = x
+            t_res, t_left, t_upper, t_lower = t
+            outputs_res, outputs_left, outputs_upper, outputs_lower = pred
+
+            u_t = torch.autograd.grad(outputs_res, t_res, grad_outputs=torch.ones_like(outputs_res), retain_graph=True,
+                                      create_graph=True)[0]
+
+            return u_t - pde_coefs["rho"] * outputs_res * (1 - outputs_res), \
+                   outputs_upper - outputs_lower, \
+                   outputs_left[:, 0] - torch.exp(-(1 / 2) * torch.square((x_left[:, 0] - np.pi) / (np.pi / 4)))
 
     elif pde_name == "wave":
         if "beta" not in pde_coefs.keys():
@@ -125,27 +184,69 @@ def get_pde(pde_name, pde_params_list, loss_name):
             t_res, t_left, t_upper, t_lower = t
             outputs_res, outputs_left, outputs_upper, outputs_lower = pred
 
-            u_x = torch.autograd.grad(outputs_res, x_res, grad_outputs=torch.ones_like(outputs_res), retain_graph=True, create_graph=True)[0]
-            u_xx = torch.autograd.grad(u_x, x_res, grad_outputs=torch.ones_like(outputs_res), retain_graph=True, create_graph=True)[0]
-            u_t = torch.autograd.grad(outputs_res, t_res, grad_outputs=torch.ones_like(outputs_res), retain_graph=True, create_graph=True)[0]
-            u_tt = torch.autograd.grad(u_t, t_res, grad_outputs=torch.ones_like(outputs_res), retain_graph=True, create_graph=True)[0]
+            u_x = torch.autograd.grad(outputs_res, x_res, grad_outputs=torch.ones_like(outputs_res), retain_graph=True,
+                                      create_graph=True)[0]
+            u_xx = torch.autograd.grad(u_x, x_res, grad_outputs=torch.ones_like(outputs_res), retain_graph=True,
+                                       create_graph=True)[0]
+            u_t = torch.autograd.grad(outputs_res, t_res, grad_outputs=torch.ones_like(outputs_res), retain_graph=True,
+                                      create_graph=True)[0]
+            u_tt = torch.autograd.grad(u_t, t_res, grad_outputs=torch.ones_like(outputs_res), retain_graph=True,
+                                       create_graph=True)[0]
 
-            loss_res = loss_type["res"](u_tt - 4 * u_xx, torch.zeros_like(u_tt))
-            loss_bc = loss_type["bc"](outputs_upper, torch.zeros_like(outputs_upper)) + loss_type["bc"](outputs_lower, torch.zeros_like(outputs_lower))
+            loss_res = loss_type["res"](u_tt - (pde_coefs["c"] ** 2) * u_xx, torch.zeros_like(u_tt))
+            loss_bc = loss_type["bc"](outputs_upper, torch.zeros_like(outputs_upper)) + loss_type["bc"](outputs_lower,
+                                                                                                        torch.zeros_like(
+                                                                                                            outputs_lower))
 
-            ui_t = torch.autograd.grad(outputs_left, t_left, grad_outputs=torch.ones_like(outputs_left), retain_graph=True, create_graph=True)[0]
+            ui_t = \
+            torch.autograd.grad(outputs_left, t_left, grad_outputs=torch.ones_like(outputs_left), retain_graph=True,
+                                create_graph=True)[0]
 
-            loss_ic_1 = loss_type["ic"](outputs_left[:,0], torch.sin(np.pi * x_left[:,0]) + 0.5 * torch.sin(pde_coefs["beta"] * np.pi * x_left[:,0]))
+            loss_ic_1 = loss_type["ic"](outputs_left[:, 0], torch.sin(np.pi * x_left[:, 0]) + 0.5 * torch.sin(
+                pde_coefs["beta"] * np.pi * x_left[:, 0]))
             loss_ic_2 = loss_type["ic"](ui_t, torch.zeros_like(ui_t))
 
             loss_ic = loss_ic_1 + loss_ic_2
 
             return loss_res, loss_bc, loss_ic
 
-    else: 
+        def loss_func_list(x, t, pred):
+            x_res, x_left, x_upper, x_lower = x
+            t_res, t_left, t_upper, t_lower = t
+            outputs_res, outputs_left, outputs_upper, outputs_lower = pred
+
+            u_x = torch.autograd.grad(outputs_res, x_res, grad_outputs=torch.ones_like(outputs_res), retain_graph=True,
+                                      create_graph=True)[0]
+            u_xx = torch.autograd.grad(u_x, x_res, grad_outputs=torch.ones_like(outputs_res), retain_graph=True,
+                                       create_graph=True)[0]
+            u_t = torch.autograd.grad(outputs_res, t_res, grad_outputs=torch.ones_like(outputs_res), retain_graph=True,
+                                      create_graph=True)[0]
+            u_tt = torch.autograd.grad(u_t, t_res, grad_outputs=torch.ones_like(outputs_res), retain_graph=True,
+                                       create_graph=True)[0]
+
+            # loss_res = loss_type["res"](u_tt - (pde_coefs["c"] ** 2) * u_xx, torch.zeros_like(u_tt))
+            # loss_bc = loss_type["bc"](outputs_upper, torch.zeros_like(outputs_upper)) + loss_type["bc"](outputs_lower, torch.zeros_like(outputs_lower))
+
+            ui_t = \
+            torch.autograd.grad(outputs_left, t_left, grad_outputs=torch.ones_like(outputs_left), retain_graph=True,
+                                create_graph=True)[0]
+
+            # loss_ic_1 = loss_type["ic"](outputs_left[:,0], torch.sin(np.pi * x_left[:,0]) + 0.5 * torch.sin(pde_coefs["beta"] * np.pi * x_left[:,0]))
+            # loss_ic_2 = loss_type["ic"](ui_t, torch.zeros_like(ui_t))
+
+            # loss_ic = loss_ic_1 + loss_ic_2
+
+            return u_tt - (pde_coefs["c"] ** 2) * u_xx, \
+                outputs_upper, outputs_lower, \
+                   outputs_left[:, 0] - (torch.sin(np.pi * x_left[:, 0]) + 0.5 * torch.sin(
+                       pde_coefs["beta"] * np.pi * x_left[:, 0])), \
+                ui_t
+
+    else:
         raise RuntimeError("{} is not a valid PDE name.".format(pde_name))
 
-    return x_range, t_range, loss_func, pde_coefs
+    return x_range, t_range, loss_func, pde_coefs, loss_func_list
+
 
 """
 Helper function for computing reference solution to the given PDE at given points. 
@@ -159,11 +260,14 @@ INPUT:
 OUTPUT: 
 - sol: 
 """
-def get_ref_solutions(pde_name, pde_coefs, x, t, data_params): 
-    if pde_name == "convection": 
-        sol = np.vstack([np.sin(x[i].cpu().detach().numpy() - pde_coefs["beta"] * t[i].cpu().detach().numpy()) for i in range(len(x))])
-    
-    elif pde_name == "reaction_diffusion": 
+
+
+def get_ref_solutions(pde_name, pde_coefs, x, t, data_params):
+    if pde_name == "convection":
+        sol = np.vstack([np.sin(x[i].cpu().detach().numpy() - pde_coefs["beta"] * t[i].cpu().detach().numpy()) for i in
+                         range(len(x))])
+
+    elif pde_name == "reaction_diffusion":
         # unpack data-generation parameters
         x_range = data_params["x_range"]
         t_range = data_params["t_range"]
@@ -171,22 +275,23 @@ def get_ref_solutions(pde_name, pde_coefs, x, t, data_params):
         t_num = data_params["t_num"]
         res_idx = data_params["res_idx"]
         # generate grid
-        x = np.linspace(x_range[0], x_range[1], x_num-1, endpoint=False).reshape(-1, 1) # exclude upper boundary
+        x = np.linspace(x_range[0], x_range[1], x_num - 1, endpoint=False).reshape(-1, 1)  # exclude upper boundary
         t = np.linspace(t_range[0], t_range[1], t_num).reshape(-1, 1)
         x_mesh, t_mesh = np.meshgrid(x, t)
         # compute initial solution
-        u0 = np.exp(-(1/2) * np.square((x - np.pi) / (np.pi / 4))).flatten()
+        # u0 = np.exp(-(1/2) * np.square((x - np.pi) / (np.pi / 4))).flatten()
+        u0 = np.exp(-2 * np.square((x - np.pi))).flatten()
         u = np.zeros((x_num, t_num))
-        u[:-1,0] = u0
+        u[:-1, 0] = u0
 
-        IKX_pos = 1j * np.arange(0, (x_num-1) / 2 + 1, 1)
-        IKX_neg = 1j * np.arange(-(x_num-1) / 2 + 1, 0, 1)
+        IKX_pos = 1j * np.arange(0, (x_num - 1) / 2 + 1, 1)
+        IKX_neg = 1j * np.arange(-(x_num - 1) / 2 + 1, 0, 1)
         IKX = np.concatenate((IKX_pos, IKX_neg))
         IKX2 = IKX * IKX
         # perform time-marching
         t_step_size = (t_range[1] - t_range[0]) / (t_num - 1)
         u_t = u0.copy()
-        for i in range(t_num - 1): 
+        for i in range(t_num - 1):
             # reaction component
             factor = u_t * np.exp(pde_coefs['rho'] * t_step_size)
             u_t = factor / (factor + (1 - u_t))
@@ -194,37 +299,40 @@ def get_ref_solutions(pde_name, pde_coefs, x, t, data_params):
             factor = np.exp(pde_coefs['nu'] * IKX2 * t_step_size)
             u_hat = np.fft.fft(u_t) * factor
             u_t = np.real(np.fft.ifft(u_hat))
-            u[:-1,i+1] = u_t
+            u[:-1, i + 1] = u_t
 
         # add back solution on the upper boundary using the periodic boundary condition
-        u[-1,:] = u[0,:]
+        u[-1, :] = u[0, :]
         # split the solution
-        sol_left = u[:,0].reshape(-1,1)
-        sol_upper = u[-1,:].reshape(-1,1)
-        sol_lower = u[0,:].reshape(-1,1)
-        sol_res = u[1:-1, 1:].T.reshape(-1,1)[res_idx]
+        sol_left = u[:, 0].reshape(-1, 1)
+        sol_upper = u[-1, :].reshape(-1, 1)
+        sol_lower = u[0, :].reshape(-1, 1)
+        sol_res = u[1:-1, 1:].T.reshape(-1, 1)[res_idx]
 
         sol = np.vstack([sol_res, sol_left, sol_upper, sol_lower])
-    
-    elif pde_name == "reaction": 
-        def compute_sol(x, t): 
-            initial_func_term = np.exp(-(1/2) * np.square((x - np.pi) / (np.pi / 4)))
+
+    elif pde_name == "reaction":
+        def compute_sol(x, t):
+            initial_func_term = np.exp(-(1 / 2) * np.square((x - np.pi) / (np.pi / 4)))
             exp_term = np.exp(pde_coefs['rho'] * t)
             return initial_func_term * exp_term / (initial_func_term * exp_term + 1 - initial_func_term)
-        
+
         sol = np.vstack([compute_sol(x[i].cpu().detach().numpy(), t[i].cpu().detach().numpy()) for i in range(len(x))])
 
     elif pde_name == "wave":
         def compute_sol(x, t):
-            return np.sin(np.pi * x) * np.cos(2 * np.pi * t) \
-                + 0.5 * np.sin(pde_coefs["beta"] * np.pi * x) * np.cos(2 * pde_coefs["beta"] * np.pi * t)
+            # return np.sin(np.pi * x) * np.cos(2 * np.pi * t) \
+            #     + 0.5 * np.sin(pde_coefs["beta"] * np.pi * x) * np.cos(2 * pde_coefs["beta"] * np.pi * t)
+            return np.sin(np.pi * x) * np.cos(pde_coefs["c"] * np.pi * t) \
+                + 0.5 * np.sin(pde_coefs["beta"] * np.pi * x) * np.cos(pde_coefs["c"] * pde_coefs["beta"] * np.pi * t)
 
         sol = np.vstack([compute_sol(x[i].cpu().detach().numpy(), t[i].cpu().detach().numpy()) for i in range(len(x))])
 
-    else: 
+    else:
         raise RuntimeError("{} is not a valid PDE name.".format(pde_name))
-    
+
     return sol
+
 
 """
 Helper function for setting seed for the random number generator in various packages.
@@ -232,11 +340,14 @@ Helper function for setting seed for the random number generator in various pack
 INPUT: 
 - seed: integer
 """
-def set_random_seed(seed): 
+
+
+def set_random_seed(seed):
     np.random.seed(seed)
     random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
+
 
 """
 Helper function for generating data on a grid. 
@@ -261,62 +372,78 @@ where:
 > b_lower: numpy array / tensor of size (t_num) * 2; lower boundary points
 > res_idx: numpy array of length (x_num-2)(t_num-1) or num_res_samples; corresponding indices of the sampled residual points from the interior grid
 """
-def get_data(x_range, t_range, x_num, t_num, random=False, num_res_samples=1e4, device='cpu', sample_seed=1234):
+
+
+def get_data(x_range, t_range, x_num, t_num, random=False, num_res_samples=1e4, device='cpu'):
     # generate initial and boundary points
     x = np.linspace(x_range[0], x_range[1], x_num).reshape(-1, 1)
     t = np.linspace(t_range[0], t_range[1], t_num).reshape(-1, 1)
     # initial time
     x_left = x.copy()
-    t_left = t_range[0] * np.ones([x_num,1])
+    t_left = t_range[0] * np.ones([x_num, 1])
     # lower boundary
-    x_lower = x_range[0] * np.ones([t_num,1])
+    x_lower = x_range[0] * np.ones([t_num, 1])
     t_lower = t.copy()
     # upper boundary
-    x_upper = x_range[1] * np.ones([t_num,1])
+    x_upper = x_range[1] * np.ones([t_num, 1])
     t_upper = t.copy()
     # residual points
     x_mesh, t_mesh = np.meshgrid(x[1:-1], t[1:])
     data_params = {
-        "x_range": x_range, 
-        "t_range": t_range, 
-        "x_num": x_num, 
+        "x_range": x_range,
+        "t_range": t_range,
+        "x_num": x_num,
         "t_num": t_num
     }
     if random:
-        set_random_seed(sample_seed)
         mesh = np.hstack((x_mesh.flatten()[:, None], t_mesh.flatten()[:, None]))
         idx = np.random.choice(mesh.shape[0], num_res_samples, replace=False)
         x_res = mesh[idx, 0:1]
         t_res = mesh[idx, 1:2]
         data_params["res_idx"] = idx
-    else: 
-        x_res = x_mesh.reshape(-1,1)
-        t_res = t_mesh.reshape(-1,1)
+    else:
+        x_res = x_mesh.reshape(-1, 1)
+        t_res = t_mesh.reshape(-1, 1)
         data_params["res_idx"] = np.arange((x_num - 2) * (t_num - 1))
 
     # move data to target device
-    x_left = torch.tensor(x_left, dtype=torch.float32, requires_grad=True).to(device)
-    t_left = torch.tensor(t_left, dtype=torch.float32, requires_grad=True).to(device)
-    x_upper = torch.tensor(x_upper, dtype=torch.float32, requires_grad=True).to(device)
-    t_upper = torch.tensor(t_upper, dtype=torch.float32, requires_grad=True).to(device)
-    x_lower = torch.tensor(x_lower, dtype=torch.float32, requires_grad=True).to(device)
-    t_lower = torch.tensor(t_lower, dtype=torch.float32, requires_grad=True).to(device)
-    x_res = torch.tensor(x_res, dtype=torch.float32, requires_grad=True).to(device)
-    t_res = torch.tensor(t_res, dtype=torch.float32, requires_grad=True).to(device)
+    if device != 'cpu':
+        x_left = torch.tensor(x_left, dtype=torch.float32, requires_grad=True).to(device)
+        t_left = torch.tensor(t_left, dtype=torch.float32, requires_grad=True).to(device)
+        x_upper = torch.tensor(x_upper, dtype=torch.float32, requires_grad=True).to(device)
+        t_upper = torch.tensor(t_upper, dtype=torch.float32, requires_grad=True).to(device)
+        x_lower = torch.tensor(x_lower, dtype=torch.float32, requires_grad=True).to(device)
+        t_lower = torch.tensor(t_lower, dtype=torch.float32, requires_grad=True).to(device)
+        x_res = torch.tensor(x_res, dtype=torch.float32, requires_grad=True).to(device)
+        t_res = torch.tensor(t_res, dtype=torch.float32, requires_grad=True).to(device)
 
     # form tuples
+    # 将 NumPy 数组转换为 PyTorch 张量
+    x_res = torch.tensor(x_res, dtype=torch.float32, requires_grad=True)
+    t_res = torch.tensor(t_res, dtype=torch.float32, requires_grad=True)
+    x_left = torch.tensor(x_left, dtype=torch.float32, requires_grad=True)
+    t_left = torch.tensor(t_left, dtype=torch.float32, requires_grad=True)
+    x_upper = torch.tensor(x_upper, dtype=torch.float32, requires_grad=True)
+    t_upper = torch.tensor(t_upper, dtype=torch.float32, requires_grad=True)
+    x_lower = torch.tensor(x_lower, dtype=torch.float32, requires_grad=True)
+    t_lower = torch.tensor(t_lower, dtype=torch.float32, requires_grad=True)
+
     x = (x_res, x_left, x_upper, x_lower)
     t = (t_res, t_left, t_upper, t_lower)
 
     return x, t, data_params
 
+
 """
 Helper function for initializing neural net parameters. 
 """
+
+
 def init_weights(m):
     if isinstance(m, nn.Linear):
         torch.nn.init.xavier_normal_(m.weight)
         m.bias.data.fill_(0.0)
+
 
 """
 Helper function for making predictions with PINN. 
@@ -334,18 +461,20 @@ where:
 > pred_lower: predictions on lower boundary points
 """
 
-def predict(x, t, model): 
+
+def predict(x, t, model):
     x_res, x_left, x_upper, x_lower = x
     t_res, t_left, t_upper, t_lower = t
-    
+
     pred_res = model(x_res, t_res)
     pred_left = model(x_left, t_left)
     pred_upper = model(x_upper, t_upper)
     pred_lower = model(x_lower, t_lower)
-    
-    preds = (pred_res, pred_left, pred_upper, pred_lower) 
-    
+
+    preds = (pred_res, pred_left, pred_upper, pred_lower)
+
     return preds
+
 
 def ensemble_pred(x, t, ensemble):
     x_res, x_left, x_upper, x_lower = x
@@ -373,7 +502,8 @@ def ensemble_pred(x, t, ensemble):
     pred_avg = (pred_res_avg, pred_left_avg, pred_upper_avg, pred_lower_avg)
 
     return pred_avg
-        
+
+
 """
 Helper function for computing l1 relative error. 
 
@@ -383,8 +513,11 @@ INPUT:
 OUTPUT: 
 - error: scalar; computed relative error
 """
-def l1_relative_error(prediction, target): 
-    return np.sum(np.abs(target-prediction)) / np.sum(np.abs(target))
+
+
+def l1_relative_error(prediction, target):
+    return np.sum(np.abs(target - prediction)) / np.sum(np.abs(target))
+
 
 """
 Helper function for computing l2 relative error. 
@@ -395,8 +528,11 @@ INPUT:
 OUTPUT: 
 - error: scalar; computed relative error
 """
-def l2_relative_error(prediction, target): 
-    return np.sqrt(np.sum((target-prediction)**2) / np.sum(target**2))
+
+
+def l2_relative_error(prediction, target):
+    return np.sqrt(np.sum((target - prediction) ** 2) / np.sum(target ** 2))
+
 
 """
 Helper function for initializing the optimizer with specified parameters. 
@@ -408,13 +544,15 @@ INPUT:
 OUTPUT: 
 - opt: torch.optim.Optimizer instance
 """
+
+
 def get_opt(opt_name, opt_params, model_params):
     if opt_name == 'adam':
         return Adam(model_params, **opt_params)
     elif opt_name == 'lbfgs':
         if "history_size" in opt_params:
             opt_params["history_size"] = int(opt_params["history_size"])
-        return LBFGS(model_params, **opt_params, line_search_fn='strong_wolfe')
+        return LBFGS(model_params, **opt_params, line_search_fn='strong_wolfe', max_iter=100000, history_size=100)
     elif opt_name == 'adam_lbfgs':
         if "switch_epochs" not in opt_params:
             raise KeyError("switch_epochs is not specified for Adam_LBFGS optimizer.")
@@ -429,7 +567,7 @@ def get_opt(opt_name, opt_params, model_params):
         adam_params = {k[5:]: v for k, v in opt_params.items() if k.startswith("adam_")}
         lbfgs_params = {k[6:]: v for k, v in opt_params.items() if k.startswith("lbfgs_")}
         lbfgs_params["line_search_fn"] = "strong_wolfe"
-        
+
         # If max_iter or history_size is specified, convert them to integers
         if "max_iter" in lbfgs_params:
             lbfgs_params["max_iter"] = int(lbfgs_params["max_iter"])
@@ -465,7 +603,8 @@ def get_opt(opt_name, opt_params, model_params):
         if "rank" in nncg_params:
             nncg_params["rank"] = int(nncg_params["rank"])
 
-        return Adam_LBFGS_NNCG(model_params, switch_epoch_lbfgs, switch_epoch_nncg, precond_update_freq, adam_params, lbfgs_params, nncg_params)
+        return Adam_LBFGS_NNCG(model_params, switch_epoch_lbfgs, switch_epoch_nncg, precond_update_freq, adam_params,
+                               lbfgs_params, nncg_params)
     elif opt_name == 'adam_lbfgs_gd':
         if "switch_epoch_lbfgs" not in opt_params:
             raise KeyError("switch_epoch_lbfgs is not specified for Adam_LBFGS_GD optimizer.")
@@ -491,6 +630,7 @@ def get_opt(opt_name, opt_params, model_params):
     else:
         raise ValueError(f'Optimizer {opt_name} not supported')
 
+
 """
 Helper function for parsing a mixed list of strings and numerical values. 
 
@@ -499,8 +639,9 @@ INPUT:
 OUTPUT: 
 - params_dict: dictionary
 """
+
+
 def parse_params_list(params_list):
-    # return an empty dictionary if there is no parameters specified
     if params_list is None:
         return {}
     params_dict = json.loads(params_list)
@@ -514,7 +655,7 @@ INPUT:
 OUTPUT: 
 - opt_params: dictionary
 """
-def get_opt_params(opt_params_list): 
+def get_opt_params(opt_params_list):
     return parse_params_list(opt_params_list)
 
 """
@@ -550,6 +691,115 @@ def get_log_times(opt, log_freq, num_epochs):
 
     return log_times
 
+
+def alm(model, device, alm_mu=2, alm_L=1, alm_beta=2, alm_iter=10, alm_hc=0b11110, weight_decay=0):
+    """
+    Generalized ALM (Augmented Lagrangian Method)
+    -------------------------------------------------
+    🔹 Automatically adapts to any number of loss components
+    🔹 No explicit handling for 3-loss / 5-loss cases
+    🔹 Uses bitmask (alm_hc) to determine which losses use hard constraints
+
+    Parameters
+    ----------
+    model : nn.Module
+        The PINN model, must define loss_func_list(x, t, outputs)
+    device : torch.device
+        CUDA or CPU
+    alm_mu : float
+        Initial penalty coefficient
+    alm_L : float
+        Soft constraint weight
+    alm_beta : float
+        Multiplier for μ after each iteration
+    alm_iter : int
+        Number of ALM iterations
+    alm_hc : int (bitmask)
+        Binary flag controlling which losses use hard constraints.
+        Each bit corresponds to one loss component in model.loss_func_list().
+
+        Bit → Loss component mapping (example for PINNs):
+            bit 0 → PDE residual (loss_res)
+            bit 1 → Boundary condition (loss_bc)
+            bit 2 → Initial condition (loss_ic)
+            bit 3 → Additional boundary (loss_bc_1, optional)
+            bit 4 → Additional initial (loss_ic_1, optional)
+        Example:
+            alm_hc = 0b10110  → use hard constraints on bit 1, 2 and 4 (bc, ic, ic_1)
+
+    weight_decay : float
+        L2 regularization weight
+
+    Notes
+    -----
+    - This version is fully generic; no need to manually unpack losses.
+    - Works with 3-loss or 5-loss PINN setups.
+    """
+
+    print(f'alm_L: {alm_L}, alm_beta: {alm_beta}, alm_iter: {alm_iter}')
+
+    # === 初始化 ===
+    loss_list = model.loss_func_list(model.train_x, model.train_t,
+                                         predict(model.train_x, model.train_t, model))
+
+    n_losses = len(loss_list)
+    mu_all = alm_mu
+    model.alm_loss = 0
+
+    # 初始化每个loss的lambda
+    lambda_list = []
+    for loss_i in loss_list:
+        lam = torch.zeros((len(loss_i), 1), device=device, dtype=torch.float32, requires_grad=True)
+        lambda_list.append(lam)
+
+    # === ALM主循环 ===
+    for iter_idx in range(alm_iter):
+        print(f"\n=== ALM Iter {iter_idx + 1}/{alm_iter} ===")
+
+        # detach每个loss并更新lambda
+        loss_list = model.loss_func_list(model.train_x, model.train_t,
+                                         predict(model.train_x, model.train_t, model))
+        for i, (loss_i, lam_i) in enumerate(zip(loss_list, lambda_list)):
+            lambda_list[i] = lam_i + mu_all * loss_i.clone().detach().to(device).requires_grad_()
+
+        mu_all *= alm_beta
+
+        # === 定义closure ===
+        def closure():
+            model.opt.zero_grad()
+            outputs = predict(model.train_x, model.train_t, model)
+            losses = model.loss_func_list(model.train_x, model.train_t, outputs)
+            loss_total = torch.tensor(0.0).to(device).requires_grad_()
+
+            # 位掩码控制硬/软约束
+            for i, (loss_i, lam_i) in enumerate(zip(losses, lambda_list)):
+                if alm_hc & (1 << i):  # bit为1 → 硬约束
+                    loss_total = loss_total + torch.mean(lam_i * loss_i) + 0.5 * mu_all * torch.mean(loss_i ** 2)
+                else:  # bit为0 → 软约束
+                    loss_total = loss_total + alm_L * torch.mean(loss_i ** 2)
+
+            # L2正则化
+            l2_norm = sum(p.pow(2.0).sum() for p in model.parameters())
+            loss_total += weight_decay * l2_norm
+
+            model.alm_loss = loss_total.item()
+            loss_total.backward(retain_graph=True)
+
+            return loss_total
+
+        # === 优化一步 ===
+        model.train()
+        model.opt = get_opt(model.opt_name, model.opt_params, model.parameters())
+        model.opt.step(closure)
+
+        # 打印每个loss信息
+        losses_eval = model.loss_func_list(model.train_x, model.train_t,
+                                            predict(model.train_x, model.train_t, model))
+        loss_vals = [torch.mean(l ** 2).item() for l in losses_eval]
+        print(f"Loss components: {loss_vals}")
+
+    return model.alm_loss
+
 def train(model,
           proj_name,
           pde_name,
@@ -565,8 +815,9 @@ def train(model,
           folder,
           dataset_path,
           new_data,
-          sample_seed):
-    
+          sample_seed,
+          hc,
+          L):
     metric_file = os.path.join(folder, "base_metrics.npy")
     if not os.path.exists(metric_file):
         if not os.path.exists(folder):
@@ -576,6 +827,7 @@ def train(model,
             'loss_res': [],
             'loss_bc': [],
             'loss_ic': [],
+            'alm_loss': [],
             'train/l1re': [],
             'train/l2re': [],
             'test/l1re': [],
@@ -588,9 +840,15 @@ def train(model,
 
     model.apply(init_weights)
 
-    x_range, t_range, loss_func, pde_coefs = get_pde(pde_name, pde_params, loss_name)
+    x_range, t_range, loss_func, pde_coefs, loss_func_list = get_pde(pde_name, pde_params, loss_name)
     opt_params = get_opt_params(opt_params_list)
     opt = get_opt(opt_name, opt_params, model.parameters())
+
+    model.opt = opt
+    model.opt_name = opt_name
+    model.opt_params = opt_params
+    model.loss_func = loss_func
+    model.loss_func_list = loss_func_list
 
     logging_times = get_log_times(opt, LOG_FREQ, num_epochs)
 
@@ -598,6 +856,8 @@ def train(model,
         if not os.path.exists(dataset_path):
             os.makedirs(dataset_path)
         training_set = os.path.join(dataset_path, 'train_'+str(sample_seed)+'.pt')
+
+        set_random_seed(sample_seed)
         x, t, data_params = get_data(x_range, t_range, n_x, n_t, random=True, num_res_samples=n_res, device=device)
         wandb.log({'x': x, 't': t}) # Log training set
         torch.save({
@@ -611,13 +871,17 @@ def train(model,
         t = (data['t_res'], data['t_left'], data['t_upper'], data['t_lower'])
         data_params = data['data_params']
 
+    model.train_x = x
+    model.train_t = t
+
     loss_res, loss_bc, loss_ic = loss_func(x, t, predict(x, t, model))
     loss = loss_res + loss_bc + loss_ic
     wandb.log({'loss': loss.item(),
             'loss_res': loss_res.item(),
             'loss_bc': loss_bc.item(),
             'loss_ic': loss_ic.item()})
-    
+
+    alm_loss = 0
     for i in range(num_epochs):
         model.train()
 
@@ -645,7 +909,7 @@ def train(model,
                 opt.zero_grad()
                 outputs = predict(x, t, model)
                 loss_res, loss_bc, loss_ic = loss_func(x, t, outputs)
-                loss = loss_res + loss_bc + loss_ic
+                loss = L * loss_res + loss_bc + loss_ic
                 loss.backward()
                 return loss
 
@@ -682,7 +946,10 @@ def train(model,
                 'loss_bc': loss_bc.item(),
                 'loss_ic': loss_ic.item(),
                 'grad_norm': grad_norm})
-            
+
+    if hc == 'alm':
+        alm_loss = alm(model, device)
+
     # evaluate training loss
     loss_res, loss_bc, loss_ic = loss_func(x, t, predict(x, t, model))
     loss = loss_res + loss_bc + loss_ic
@@ -692,12 +959,12 @@ def train(model,
                 'loss_bc': loss_bc.item(),
                 'loss_ic': loss_ic.item(),
                 'grad_norm': grad_norm})
-    
     metrics['loss'].append(loss.item())
     metrics['loss_res'].append(loss_res.item())
     metrics['loss_bc'].append(loss_bc.item())
     metrics['loss_ic'].append(loss_ic.item())
-    
+    metrics['alm_loss'].append(alm_loss)
+
     # evaluate errors
     with torch.no_grad():
         predictions = torch.vstack(predict(x, t, model)).cpu().detach().numpy()
@@ -706,7 +973,7 @@ def train(model,
     train_l2re = l2_relative_error(predictions, targets)
 
     # coarse grid for testing
-    n_x_test = int((n_x - 1) / 2) + 1
+    n_x_test = n_x
     n_t_test = n_t
     x_test, t_test, data_params_test = get_data(x_range, t_range, n_x_test, n_t_test, random=False, device=device)
     with torch.no_grad():
@@ -719,7 +986,6 @@ def train(model,
                 'train/l2re': train_l2re,
                 'test/l1re': test_l1re,
                 'test/l2re': test_l2re})
-    
     metrics['train/l1re'].append(train_l1re)
     metrics['train/l2re'].append(train_l2re)
     metrics['test/l1re'].append(test_l1re)
@@ -729,7 +995,7 @@ def train(model,
     model.eval()
     outputs = predict(x, t, model)
 
-    hessian_comp = hessian(model, predict, loss_func, data=(x, t))
+    hessian_comp = hessian(model, predict, loss_func, data=(x, t), device=device)
 
     top_eigenvalue, _, _ = hessian_comp.eigenvalues(top_n=1)
     trace = hessian_comp.trace()
@@ -742,4 +1008,7 @@ def train(model,
         'hessian/max_eigenvalue': top_eigenvalue[0]
     })
 
+    print(metrics)
     np.save(metric_file, metrics)
+
+    return loss.item()
