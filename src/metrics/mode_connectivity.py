@@ -35,20 +35,30 @@ def main():
     parser.add_argument('--device', type=str, default=0, help='GPU to use')
     parser.add_argument('--save_path', type=str, help='path to save the results of experiments')
 
+    parser.add_argument('--seed_sample', type=int, default=1234, help='sample seed')
+    parser.add_argument('--hc', type=str, default='alm', help='hc method')
+
     # Extract arguments from parser
     args = parser.parse_args()
 
     device = f'cuda:{args.device}' if torch.cuda.is_available() else 'cpu'
 
     model_list = []
+    pde_param = json.loads(args.pde_params)
     if args.pde == "convection":
-        model_folder = os.path.join("saved_models", "system_convection", f"N_f_{args.num_res}", f"beta_{args.pde_params[1]}")
-        dataset_path = os.path.join("./dataset", f'system_{experiment_args["pde"]}', 
-                          f'N_f_{experiment_args["num_res"]}',f'beta_{float(experiment_args["pde_params"][-1])}', 'train.pt') 
+        model_folder = os.path.join("../../saved_models", "system_convection", f"N_f_{args.num_res}",
+                                    f"beta_{float(pde_param['beta'])}", args.hc)
+        dataset_path = os.path.join("../../dataset", f'system_{args.pde}',
+                          f'N_f_{args.num_res}', f"beta_{float(pde_param['beta'])}", args.hc, 'train_'+str(args.seed_sample)+'.pt')
     elif args.pde == "reaction":
-        model_folder = os.path.join("saved_models", "system_reaction", f"N_f_{args.num_res}", f"rho_{args.pde_params[1]}")
-        dataset_path = os.path.join("./dataset", f'system_{experiment_args["pde"]}', 
-                          f'N_f_{experiment_args["num_res"]}',f'rho_{float(experiment_args["pde_params"][-1])}', 'train.pt')
+        model_folder = os.path.join("../../saved_models", "system_reaction", f"N_f_{args.num_res}", f"rho_{float(pde_param['rho'])}", args.hc)
+        dataset_path = os.path.join("../../dataset", "system_reaction", f"N_f_{args.num_res}", f"rho_{float(pde_param['rho'])}", args.hc, 'train_'+str(args.seed_sample)+'.pt')
+    elif args.pde == "wave":
+        model_folder = os.path.join("../../saved_models", "system_wave", f"N_f_{args.num_res}", f'beta_{float(pde_param["beta"])}_c_{float(pde_param["c"])}', args.hc)
+        dataset_path = os.path.join("../../dataset", "system_wave", f"N_f_{args.num_res}", f'beta_{float(pde_param["beta"])}_c_{float(pde_param["c"])}', args.hc, 'train_'+str(args.seed_sample)+'.pt')
+    elif args.pde == "reaction_diffusion":
+        model_folder = os.path.join("../../saved_models", "system_reaction_diffusion", f"N_f_{args.num_res}", f'nu_{float(pde_param["nu"])}_rho_{float(pde_param["rho"])}', args.hc)
+        dataset_path = os.path.join("../../dataset", "system_reaction_diffusion", f"N_f_{args.num_res}", f'nu_{float(pde_param["nu"])}_rho_{float(pde_param["rho"])}', args.hc, 'train_'+str(args.seed_sample)+'.pt')
 
     for filename in os.listdir(model_folder):
         if filename.endswith(".pt"):
@@ -132,13 +142,11 @@ def main():
     print("The mc matrix is:")
     print(mc)
 
-    if args.pde == "convection":
-        folder = os.path.join(args.save_path, "system_convection", f"N_f_{args.num_res}", f"beta_{float(args.pde_params[1])}")
-    if not os.path.exists(folder):
-        os.makedirs(folder)
-        np.save(folder + '/mode_connectivity.npy', mc)
+    if not os.path.exists(model_folder):
+        os.makedirs(model_folder)
+        np.save(model_folder + '/mode_connectivity.npy', mc)
     else:
-        np.save(folder + '/mode_connectivity.npy', mc)
+        np.save(model_folder + '/mode_connectivity.npy', mc)
 
 if __name__ == "__main__":
     main()

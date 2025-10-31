@@ -78,6 +78,7 @@ def main():
                         default='pinns', help='W&B project name')
     parser.add_argument('--device', type=str, default=0, help='GPU to use')
     parser.add_argument('--save_path', type=str, help='path to save the results of experiments')
+    parser.add_argument('--hc', type=str, default='none', help='soft or hard constraint')
 
     # Extract arguments from parser
     args = parser.parse_args()
@@ -85,13 +86,19 @@ def main():
     device = f'cuda:{args.device}' if torch.cuda.is_available() else 'cpu'
 
     print("Collocation points: ", args.num_res)
-    print("PDE coefficient: ", args.pde_params[1])
+
+    pde_param = json.loads(args.pde_params)
+    print("PDE coefficient: ", pde_param)
 
     model_list = []
     if args.pde == "convection":
-        model_folder = os.path.join("saved_models", "system_convection", f"N_f_{args.num_res}", f"beta_{args.pde_params[1]}")
+        model_folder = os.path.join("../../saved_models", "system_convection", f"N_f_{args.num_res}", f"beta_{float(pde_param['beta'])}", args.hc)
     elif args.pde == "reaction":
-        model_folder = os.path.join("saved_models", "system_reaction", f"N_f_{args.num_res}", f"rho_{args.pde_params[1]}")
+        model_folder = os.path.join("../../saved_models", "system_reaction", f"N_f_{args.num_res}", f"rho_{float(pde_param['rho'])}", args.hc)
+    elif args.pde == "wave":
+        model_folder = os.path.join("../../saved_models", "system_wave", f"N_f_{args.num_res}", f'beta_{float(pde_param["beta"])}_c_{float(pde_param["c"])}', args.hc)
+    elif args.pde == "reaction_diffusion":
+        model_folder = os.path.join("../../saved_models", "system_reaction_diffusion", f"N_f_{args.num_res}", f'nu_{float(pde_param["nu"])}_rho_{float(pde_param["rho"])}', args.hc)
 
     for filename in os.listdir(model_folder):
         if filename.endswith(".pt"):
@@ -132,15 +139,11 @@ def main():
     print("The CKA matrix is:")
     print(linear_cka_matrix)
 
-    if args.pde == "convection":
-        folder = os.path.join(args.save_path, "system_convection", f"N_f_{args.num_res}", f"beta_{float(args.pde_params[1])}")
-    elif args.pde == "reaction":
-        folder = os.path.join(args.save_path, "system_reaction", f"N_f_{args.num_res}", f"rho_{float(args.pde_params[1])}")
-    if not os.path.exists(folder):
-        os.makedirs(folder)
-        np.save(folder + '/cka_metric.npy', metrics)
+    if not os.path.exists(model_folder):
+        os.makedirs(model_folder)
+        np.save(model_folder + '/cka_metric.npy', metrics)
     else:
-        np.save(folder + '/cka_metric.npy', metrics)
+        np.save(model_folder + '/cka_metric.npy', metrics)
 
 if __name__ == "__main__":
     main()
